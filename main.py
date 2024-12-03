@@ -1,4 +1,6 @@
 import sys
+
+from PyQt5.QtCore import QEvent
 from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout
 from top_Area import TopArea
 from middle_Area import MiddleArea
@@ -44,6 +46,9 @@ class MainWindow(QWidget):
         self.layout.removeWidget(old_middle_area)
         old_middle_area.deleteLater()  # 删除旧的组件，释放资源
 
+        if hasattr(self.middle_area, 'cap') and self.middle_area.cap is not None:
+            self.middle_area.cancel()  # 假设A组件有停止摄像头的方法
+
         # 根据 task 选择不同的 middle_area
         if task == "normal":
             self.middle_area = MiddleArea(self.bottom_area)
@@ -54,6 +59,12 @@ class MainWindow(QWidget):
         self.middle_area.setFixedHeight(360)  # 如果需要，可以再次设置高度
         # 将新的 middle_area 插入到 top_area 和 bottom_area 之间
         self.layout.insertWidget(1, self.middle_area)  # 索引 1 是 middle_area 的位置
+
+    def closeEvent(self, event: QEvent):
+        """ 在窗口关闭时清理资源 """
+        if hasattr(self.middle_area, 'cap') and self.middle_area.cap is not None:
+            self.middle_area.cancel()  # 假设A组件有停止摄像头的方法
+        event.accept()  # 继续关闭窗口
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)

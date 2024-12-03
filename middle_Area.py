@@ -156,4 +156,3 @@ class MiddleArea(QWidget):
         self.label_predict.clear()
         self.label_predict.setText("预测图像")
         self.load_weights_pushbutton.setEnabled(True)
-        self.log_signal.emit("<font>取消操作，已清除所有内容。</font>")

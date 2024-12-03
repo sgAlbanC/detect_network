@@ -1,13 +1,11 @@
 from PyQt5.QtWidgets import QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog, QInputDialog, \
     QListWidget, QListWidgetItem, QMessageBox, QFrame
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtCore import Qt, pyqtSignal
 from detect import YOLOPredictor
 import os
 import compareG, saveLabelG
-import json
-
-
+import json, cv2, time
 
 
 class MiddleAreaG(QWidget):
@@ -21,6 +19,9 @@ class MiddleAreaG(QWidget):
         self.device = "cpu"
         self.keys = []
         self.newData = None
+        self.cap = None
+        self.frame_interval = 30
+        self.frame_count = 0
         # 变量初始化
         self.model_path = None
         self.image_path = None
@@ -32,6 +33,9 @@ class MiddleAreaG(QWidget):
         self.load_images_pushbutton = QPushButton("加载图片")
         self.load_images_pushbutton.clicked.connect(self.load_images)
 
+        self.open_camera_pushbutton = QPushButton("摄像头")
+        self.open_camera_pushbutton.clicked.connect(self.detect_camera)
+
         detect_pushbutton = QPushButton("点击检测")
         detect_pushbutton.clicked.connect(self.detect)
 
@@ -41,6 +45,7 @@ class MiddleAreaG(QWidget):
         layout_operate.addWidget(self.load_weights_pushbutton)
         layout_operate.addWidget(self.load_images_pushbutton)
         layout_operate.addWidget(detect_pushbutton)
+        layout_operate.addWidget(self.open_camera_pushbutton)
         layout_operate.addWidget(cancel_pushbutton)
         layout_operate.addStretch(1)
 
@@ -103,6 +108,14 @@ class MiddleAreaG(QWidget):
 
 
     def load_images(self):
+        # 关闭摄像头（如果摄像头正在运行）
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+            self.label_orign.clear()
+            self.label_orign.setText("图像显示")
+            self.log_signal.emit("<font color='red'>摄像头已关闭。</font>")
+
         # 打开文件对话框选择图片文件
         options = QFileDialog.Options()
         options |= QFileDialog.ReadOnly
@@ -130,6 +143,72 @@ class MiddleAreaG(QWidget):
             self.label_orign.setPixmap(scaled_pixmap)
             self.log_signal.emit("<font color='green'>图像成功加载!</font>")
 
+    def detect_camera(self):
+        if not self.model_path:
+            self.log_signal.emit("<font color='red'>请先加载权重文件!</font>")
+            return
+
+        # 创建YOLO预测器，并传入模型路径
+        model = YOLOPredictor(self.model_path)
+
+        self.cap = cv2.VideoCapture(0)
+
+        if not self.cap.isOpened():
+            self.log_signal.emit("<font color='red'>无法打开摄像头！</font>")
+            return
+
+        time.sleep(1)  # 等待一秒钟让摄像头初始化
+
+        self.log_signal.emit("<font color='green'>成功打开摄像头！</font>")
+
+        while True:
+            # 在读取之前，检查self.cap是否有效
+            if self.cap is None:
+                break
+
+            ret, frame = self.cap.read()
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+
+            if not ret:
+                self.log_signal.emit("<font color='red'>无法读取视频流！</font>")
+                break
+            # 每隔一定帧数进行一次目标检测
+            self.frame_count += 1
+            if self.frame_count % self.frame_interval == 0:
+
+                results = model.predict(frame, device=self.device)
+
+                # # 解析检测结果
+                # for result in results:
+                #     boxes = result.boxes.xyxy.cpu().numpy()  # 获取检测框的坐标
+                #
+                #     # 绘制检测框和标签
+                #     for i, box in enumerate(boxes):
+                #         x1, y1, x2, y2 = box
+                #         # 在图像上绘制检测框
+                #         cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+                #         cv2.putText(frame, 'x',
+                #                     (int(x1), int(y1) - 10),
+                #                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                self.frame_count = 0
+
+            # 转换为 QPixmap 并缩放
+            height, width, channel = frame.shape
+            bytes_per_line = 3 * width
+            q_image = QPixmap.fromImage(
+                QImage(frame.data, width, height, bytes_per_line, QImage.Format_RGB888)
+            )
+
+            # 缩放并显示图像到 QLabel
+            scaled_pixmap = q_image.scaled(
+                self.label_orign.width(), self.label_orign.height(), Qt.KeepAspectRatio
+            )
+            self.label_orign.setPixmap(scaled_pixmap)
+
+            # 按 'q' 键退出
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
     def detect(self):
         if not self.model_path or not self.image_path:
             self.log_signal.emit("<font color='red'>请先加载权重文件和图片文件!</font>")
@@ -156,7 +235,6 @@ class MiddleAreaG(QWidget):
         save_dir = results[0].save_dir  # 假设 results[0] 是保存路径
         # 获取预测速度
         speed = results[0].speed
-
 
 
         self.log_signal.emit(f"预处理：{speed['preprocess']:.2f} ms，推理：{speed['inference']:.2f} ms，后处理：{speed['postprocess']:.2f} ms")
@@ -193,14 +271,20 @@ class MiddleAreaG(QWidget):
             self.log_signal.emit("<font color='red'>未找到预测图像!</font>")
 
     def cancel(self):
-        # 清除模型和图像路径
+        # 释放摄像头
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+            self.label_orign.clear()
+            self.label_orign.setText("图像显示")
+            self.log_signal.emit("<font color='red'>摄像头已关闭。</font>")
+            cv2.destroyAllWindows()  # 关闭任何OpenCV窗口
+
+        # 清除其他内容
         self.model_path = None
         self.image_path = None
-        self.label_orign.clear()
-        self.label_orign.setText("图像显示")
         self.load_weights_pushbutton.setEnabled(True)
         self.load_images_pushbutton.setEnabled(True)
-        self.log_signal.emit("<font>取消操作，已清除所有内容。</font>")
 
     def add_gesture(self):
         # 弹出输入框，输入gesture_label
