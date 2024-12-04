@@ -63,7 +63,7 @@ class MainWindow(QWidget):
     def closeEvent(self, event: QEvent):
         """ 在窗口关闭时清理资源 """
         if hasattr(self.middle_area, 'cap') and self.middle_area.cap is not None:
-            self.middle_area.cancel()  # 假设A组件有停止摄像头的方法
+            self.middle_area.cancel()
         event.accept()  # 继续关闭窗口
 
 if __name__ == '__main__':

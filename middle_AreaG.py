@@ -1,12 +1,59 @@
 from PyQt5.QtWidgets import QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog, QInputDialog, \
     QListWidget, QListWidgetItem, QMessageBox, QFrame
 from PyQt5.QtGui import QPixmap, QImage
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal, QThread
 from detect import YOLOPredictor
 import os
 import compareG, saveLabelG
 import json, cv2, time
 
+class CameraThread(QThread):
+    """摄像头线程：负责从摄像头读取图像帧"""
+    frame_signal = pyqtSignal(object)  # 用于传递捕获到的帧
+
+    def __init__(self):
+        super().__init__()
+        self.cap = None
+        self.running = False
+
+    def run(self):
+        """启动摄像头并读取视频帧"""
+        self.cap = cv2.VideoCapture(0)  # 使用摄像头ID 0
+        if not self.cap.isOpened():
+            return
+
+        self.running = True
+        while self.running:
+            ret, frame = self.cap.read()
+            if ret:
+                self.frame_signal.emit(frame)  # 将读取到的帧传递给主线程
+            time.sleep(0.03)  # 每帧等待 30ms，大约 33 FPS
+        self.cap.release()
+
+    def stop(self):
+        """停止摄像头线程"""
+        self.running = False
+        self.wait()
+
+
+class DetectionThread(QThread):
+    """目标检测线程：负责处理图像并进行目标检测"""
+    result_signal = pyqtSignal(object)  # 用于传递检测结果
+
+    def __init__(self, model_path, device="cpu"):
+        super().__init__()
+        self.model_path = model_path
+        self.device = device
+        self.model = YOLOPredictor(self.model_path)  # 假设 YOLOPredictor 是目标检测模型
+
+    def run(self):
+        """执行目标检测"""
+        while True:
+            if hasattr(self, 'frame'):
+                frame = self.frame
+                # 进行检测
+                results = self.model.predict(frame, device=self.device)
+                self.result_signal.emit(results)  # 将检测结果传递给主线程
 
 class MiddleAreaG(QWidget):
     log_signal = pyqtSignal(str)  # 定义日志信号
@@ -20,8 +67,8 @@ class MiddleAreaG(QWidget):
         self.keys = []
         self.newData = None
         self.cap = None
-        self.frame_interval = 30
-        self.frame_count = 0
+        self.camera_thread = None
+        self.detection_thread = None
         # 变量初始化
         self.model_path = None
         self.image_path = None
@@ -109,13 +156,7 @@ class MiddleAreaG(QWidget):
 
     def load_images(self):
         # 关闭摄像头（如果摄像头正在运行）
-        if self.cap is not None:
-            self.cap.release()
-            self.cap = None
-            self.label_orign.clear()
-            self.label_orign.setText("图像显示")
-            self.log_signal.emit("<font color='red'>摄像头已关闭。</font>")
-
+        self.stop_camera()
         # 打开文件对话框选择图片文件
         options = QFileDialog.Options()
         options |= QFileDialog.ReadOnly
@@ -144,71 +185,63 @@ class MiddleAreaG(QWidget):
             self.log_signal.emit("<font color='green'>图像成功加载!</font>")
 
     def detect_camera(self):
+        """开始摄像头线程并启动目标检测"""
         if not self.model_path:
             self.log_signal.emit("<font color='red'>请先加载权重文件!</font>")
             return
 
-        # 创建YOLO预测器，并传入模型路径
-        model = YOLOPredictor(self.model_path)
+        self.add_gesture_pushbutton.setEnabled(False)
+        # 启动摄像头线程
+        self.camera_thread = CameraThread()
+        self.camera_thread.frame_signal.connect(self.process_frame)
+        self.camera_thread.start()
 
-        self.cap = cv2.VideoCapture(0)
+        # 启动目标检测线程
+        self.detection_thread = DetectionThread(self.model_path)
+        self.detection_thread.result_signal.connect(self.process_detection_results)
+        self.detection_thread.start()
 
-        if not self.cap.isOpened():
-            self.log_signal.emit("<font color='red'>无法打开摄像头！</font>")
-            return
+    def process_frame(self, frame):
+        """处理从摄像头读取的帧并传递给检测线程"""
+        self.current_frame = frame
+        if self.detection_thread:
+            self.detection_thread.frame = frame  # 将帧传递给检测线程
 
-        time.sleep(1)  # 等待一秒钟让摄像头初始化
+        # 将图像转换为 QPixmap 并显示
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        height, width, channel = frame_rgb.shape
+        bytes_per_line = 3 * width
+        q_image = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(q_image)
 
-        self.log_signal.emit("<font color='green'>成功打开摄像头！</font>")
+        # 缩放并显示图像到 QLabel
+        scaled_pixmap = pixmap.scaled(self.label_orign.width(), self.label_orign.height(), Qt.KeepAspectRatio)
+        self.label_orign.setPixmap(scaled_pixmap)
 
-        while True:
-            # 在读取之前，检查self.cap是否有效
-            if self.cap is None:
-                break
+    def process_detection_results(self, results):
+        """处理目标检测的结果并绘制框"""
+        if results:
+            frame = self.current_frame
+            for result in results:
+                boxes = result.boxes.xyxy.cpu().numpy()
+                for box in boxes:
+                    x1, y1, x2, y2 = box
+                    cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+                    cv2.putText(frame, 'x', (int(x1), int(y1) - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-            ret, frame = self.cap.read()
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # 转换并显示结果
+            self.process_frame(frame)
 
+    def stop_camera(self):
+        """停止摄像头并停止线程"""
+        if self.camera_thread:
+            self.camera_thread.stop()
+        if self.detection_thread:
+            self.detection_thread.quit()
+            self.detection_thread.wait()
+        self.add_gesture_pushbutton.setEnabled(True)
 
-            if not ret:
-                self.log_signal.emit("<font color='red'>无法读取视频流！</font>")
-                break
-            # 每隔一定帧数进行一次目标检测
-            self.frame_count += 1
-            if self.frame_count % self.frame_interval == 0:
-
-                results = model.predict(frame, device=self.device)
-
-                # # 解析检测结果
-                # for result in results:
-                #     boxes = result.boxes.xyxy.cpu().numpy()  # 获取检测框的坐标
-                #
-                #     # 绘制检测框和标签
-                #     for i, box in enumerate(boxes):
-                #         x1, y1, x2, y2 = box
-                #         # 在图像上绘制检测框
-                #         cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-                #         cv2.putText(frame, 'x',
-                #                     (int(x1), int(y1) - 10),
-                #                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                self.frame_count = 0
-
-            # 转换为 QPixmap 并缩放
-            height, width, channel = frame.shape
-            bytes_per_line = 3 * width
-            q_image = QPixmap.fromImage(
-                QImage(frame.data, width, height, bytes_per_line, QImage.Format_RGB888)
-            )
-
-            # 缩放并显示图像到 QLabel
-            scaled_pixmap = q_image.scaled(
-                self.label_orign.width(), self.label_orign.height(), Qt.KeepAspectRatio
-            )
-            self.label_orign.setPixmap(scaled_pixmap)
-
-            # 按 'q' 键退出
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
     def detect(self):
         if not self.model_path or not self.image_path:
             self.log_signal.emit("<font color='red'>请先加载权重文件和图片文件!</font>")
@@ -271,20 +304,12 @@ class MiddleAreaG(QWidget):
             self.log_signal.emit("<font color='red'>未找到预测图像!</font>")
 
     def cancel(self):
-        # 释放摄像头
-        if self.cap is not None:
-            self.cap.release()
-            self.cap = None
-            self.label_orign.clear()
-            self.label_orign.setText("图像显示")
-            self.log_signal.emit("<font color='red'>摄像头已关闭。</font>")
-            cv2.destroyAllWindows()  # 关闭任何OpenCV窗口
-
         # 清除其他内容
         self.model_path = None
         self.image_path = None
         self.load_weights_pushbutton.setEnabled(True)
         self.load_images_pushbutton.setEnabled(True)
+        self.stop_camera()
 
     def add_gesture(self):
         # 弹出输入框，输入gesture_label
